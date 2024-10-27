@@ -1,0 +1,199 @@
+import json
+import random
+import numpy as np
+import os
+import string
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+
+
+class EnhancedChatbot:
+    def __init__(self, intents_file_path="intents.json", confidence_threshold=0.4):
+        """Initialize the chatbot with the given intents file and confidence threshold."""
+        self.confidence_threshold = confidence_threshold
+        self.context = {}
+        self.conversation_history = []
+        
+        # Load intents with better file handling
+        self.intents = self._load_intents(intents_file_path)
+
+        # Train the model
+        self._prepare_training_data()
+        self._train_model()
+
+    def _load_intents(self, file_path):
+        """Load intents from various possible file paths."""
+        possible_paths = [
+            file_path,
+            os.path.join(os.getcwd(), file_path),
+            os.path.join(os.getcwd(), "data", file_path),
+            os.path.join(os.path.dirname(__file__), file_path),
+            os.path.join(os.path.dirname(__file__), "data", file_path),
+        ]
+
+        for path in possible_paths:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as file:
+                        loaded_intents = json.load(file)
+                    print(f"Successfully loaded intents from: {path}")
+                    return loaded_intents
+                except json.JSONDecodeError as e:
+                    print(f"JSON decode error in {path}: {e}")
+                except Exception as e:
+                    print(f"Error loading {path}: {e}")
+
+        # Raise an error if all attempts fail
+        raise FileNotFoundError("Intents file not found. Please ensure the file exists in one of the searched paths.")
+
+    def save_intents(self, file_path="intents.json"):
+        """Save the current intents to a file."""
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(self.intents, f, indent=4)
+            print(f"Intents saved successfully to {file_path}")
+            return True
+        except Exception as e:
+            print(f"Error saving intents: {e}")
+            return False
+
+    def add_intent(self, tag, patterns, responses):
+        """Add a new intent to the chatbot."""
+        new_intent = {"tag": tag, "patterns": patterns, "responses": responses}
+        self.intents["intents"].append(new_intent)
+        # Retrain the model
+        self._prepare_training_data()
+        self._train_model()
+
+    def _basic_tokenize(self, text):
+        """Tokenize the input text into words."""
+        return (
+            text.lower()
+            .translate(str.maketrans("", "", string.punctuation))
+            .split()
+        )
+
+    def _preprocess_text(self, text):
+        """Preprocess the input text."""
+        tokens = self._basic_tokenize(text)
+        return " ".join(tokens)
+
+    def _prepare_training_data(self):
+        """Prepare training data from intents."""
+        self.X = []
+        self.y = []
+
+        for intent in self.intents["intents"]:
+            for pattern in intent["patterns"]:
+                processed_pattern = self._preprocess_text(pattern)
+                self.X.append(processed_pattern)
+                self.y.append(intent["tag"])
+
+    def _train_model(self):
+        """Train the model using TF-IDF and Random Forest Classifier."""
+        if len(self.X) == 0 or len(self.y) == 0:
+            raise ValueError("No training data available. Please check your intents file.")
+
+        self.pipeline = Pipeline(
+            [
+                ("tfidf", TfidfVectorizer(ngram_range=(1, 2))),
+                ("classifier", RandomForestClassifier(n_estimators=100, random_state=42)),
+            ]
+        )
+
+        X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=42)
+        self.pipeline.fit(X_train, y_train)
+
+        self.accuracy = self.pipeline.score(X_test, y_test)
+        print(f"Model trained with accuracy: {self.accuracy:.2f}")
+
+    def predict_intent(self, user_input):
+        """Predict the intent of user input."""
+        processed_input = self._preprocess_text(user_input)
+        predicted_tag = self.pipeline.predict([processed_input])[0]
+        confidence = np.max(self.pipeline.predict_proba([processed_input]))
+        
+        return predicted_tag if confidence >= self.confidence_threshold else None, confidence
+
+    def _get_response(self, tag):
+        """Get a random response for the predicted tag."""
+        for intent in self.intents["intents"]:
+            if intent["tag"] == tag:
+                return random.choice(intent["responses"])
+        return "Sorry, I don't have a response for that."
+
+
+    def get_chat_response(self, user_input):
+        """Generate a response to user input."""
+        self.conversation_history.append({"user": user_input})
+        predicted_tag, confidence = self.predict_intent(user_input)
+
+        if predicted_tag is None:
+            response = "I'm not entirely sure I understand. Could you please rephrase that?"
+        else:
+            response = self._get_response(predicted_tag)
+
+        self.conversation_history.append({"bot": response})
+        return response, confidence
+
+
+def main():
+    """Main function to run the chatbot."""
+    print("Initializing chatbot...")
+    try:
+        # Create a default intents file if it doesn't exist
+        default_intents = {
+            "intents": [
+                {
+                    "tag": "greeting",
+                    "patterns": ["hello", "hi", "hey"],
+                    "responses": ["Hello!", "Hi there!", "Hey! How can I help?"],
+                },
+                {
+                    "tag": "goodbye",
+                    "patterns": ["bye", "goodbye", "see you"],
+                    "responses": ["Goodbye!", "See you later!", "Have a great day!"],
+                },
+            ]
+        }
+
+        if not os.path.exists("intents.json"):
+            with open("intents.json", "w", encoding="utf-8") as f:
+                json.dump(default_intents, f, indent=4)
+            print("Created default intents.json file")
+
+        chatbot = EnhancedChatbot()
+        print("Chatbot is ready! Type 'exit' to end the chat.")
+
+        while True:
+            try:
+                user_input = input("You: ").strip()
+
+                if user_input.lower() in ["exit", "quit", "bye"]:
+                    print("Chatbot: Goodbye! Have a great day!")
+                    break
+
+                if not user_input:
+                    print("Chatbot: Please say something!")
+                    continue
+
+                response, confidence = chatbot.get_chat_response(user_input)
+                print(f"Chatbot: {response}")
+                print(f"Confidence: {confidence:.2f}")
+
+            except KeyboardInterrupt:
+                print("\nChatbot: Goodbye! Have a great day!")
+                break
+            except Exception as e:
+                print(f"An error occurred: {e}")
+                print("Chatbot: I encountered an error. Let's continue our conversation.")
+
+    except Exception as e:
+        print(f"Failed to initialize chatbot: {e}")
+        print("Please ensure your intents.json file is properly formatted and accessible.")
+
+
+if __name__ == "__main__":
+    main()

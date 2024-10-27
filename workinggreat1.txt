@@ -1,0 +1,560 @@
+DB.PY
+
+
+
+
+import json
+import sqlite3
+import os
+
+
+def create_tables(cursor):
+    """Create the necessary tables if they don't exist."""
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS intents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tag TEXT UNIQUE NOT NULL
+        )
+    """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS patterns (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            intent_id INTEGER,
+            pattern TEXT NOT NULL,
+            FOREIGN KEY (intent_id) REFERENCES intents (id)
+        )
+    """
+    )
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            intent_id INTEGER,
+            response TEXT NOT NULL,
+            FOREIGN KEY (intent_id) REFERENCES intents (id)
+        )
+    """
+    )
+
+
+def import_data(json_data, db_path="chatbot.db"):
+    """Import data from JSON to SQLite database."""
+    try:
+        # Connect to database
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+
+        # Create tables
+        create_tables(cursor)
+
+        # Clear existing data
+        cursor.execute("DELETE FROM responses")
+        cursor.execute("DELETE FROM patterns")
+        cursor.execute("DELETE FROM intents")
+
+        # Reset auto-increment counters
+        cursor.execute(
+            'DELETE FROM sqlite_sequence WHERE name IN ("intents", "patterns", "responses")'
+        )
+
+        # Import data
+        for intent in json_data["intents"]:
+            # Insert intent
+            cursor.execute("INSERT INTO intents (tag) VALUES (?)", (intent["tag"],))
+            intent_id = cursor.lastrowid
+
+            # Insert patterns
+            for pattern in intent["patterns"]:
+                cursor.execute(
+                    "INSERT INTO patterns (intent_id, pattern) VALUES (?, ?)",
+                    (intent_id, pattern),
+                )
+
+            # Insert responses
+            for response in intent["responses"]:
+                cursor.execute(
+                    "INSERT INTO responses (intent_id, response) VALUES (?, ?)",
+                    (intent_id, response),
+                )
+
+        # Commit changes
+        conn.commit()
+        print("Data imported successfully!")
+
+        # Print summary
+        cursor.execute("SELECT COUNT(*) FROM intents")
+        intents_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM patterns")
+        patterns_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM responses")
+        responses_count = cursor.fetchone()[0]
+
+        print(f"\nImport Summary:")
+        print(f"Intents: {intents_count}")
+        print(f"Patterns: {patterns_count}")
+        print(f"Responses: {responses_count}")
+
+    except Exception as e:
+        print(f"Error importing data: {e}")
+        if conn:
+            conn.rollback()
+    finally:
+        if conn:
+            conn.close()
+
+
+def main():
+    # Check if JSON file exists
+    json_file = "intents.json"
+    if not os.path.exists(json_file):
+        print(f"Error: {json_file} not found!")
+        return
+
+    # Read JSON data
+    try:
+        with open(json_file, "r", encoding="utf-8") as f:
+            json_data = json.load(f)
+        print("JSON data loaded successfully!")
+
+        # Import data to database
+        import_data(json_data)
+
+    except json.JSONDecodeError as e:
+        print(f"Error parsing JSON file: {e}")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+
+
+
+MAIN.PY
+
+import json
+import random
+import numpy as np
+import os
+import string
+import sqlite3
+from datetime import datetime
+import schedule
+import time
+import threading
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+
+
+class EnhancedChatbot:
+    def __init__(
+        self,
+        db_path="chatbot.db",
+        confidence_threshold=0.4,
+        auto_train_interval_hours=24,
+    ):
+        """Initialize the chatbot with SQLite database and auto-training capability."""
+        self.db_path = db_path
+        self.confidence_threshold = confidence_threshold
+        self.context = {}
+        self.conversation_history = []
+
+        # Initialize database
+        self._init_database()
+
+        # Train the model
+        self._prepare_training_data()
+        self._train_model()
+
+        # Setup auto-training
+        self.auto_train_interval_hours = auto_train_interval_hours
+        self._setup_auto_training()
+
+    def _init_database(self):
+        """Initialize the SQLite database and create necessary tables."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+
+            # Create intents table
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS intents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tag TEXT UNIQUE NOT NULL
+                )
+            """
+            )
+
+            # Create patterns table
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS patterns (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    intent_id INTEGER,
+                    pattern TEXT NOT NULL,
+                    FOREIGN KEY (intent_id) REFERENCES intents (id)
+                )
+            """
+            )
+
+            # Create responses table
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS responses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    intent_id INTEGER,
+                    response TEXT NOT NULL,
+                    FOREIGN KEY (intent_id) REFERENCES intents (id)
+                )
+            """
+            )
+
+            # Create training_history table
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS training_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    accuracy FLOAT
+                )
+            """
+            )
+
+            conn.commit()
+
+    def import_intents_from_json(self, json_file_path):
+        """Import intents from a JSON file into the SQLite database."""
+        try:
+            with open(json_file_path, "r", encoding="utf-8") as file:
+                intents_data = json.load(file)
+
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                for intent in intents_data["intents"]:
+                    # Insert intent
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO intents (tag) VALUES (?)",
+                        (intent["tag"],),
+                    )
+                    cursor.execute(
+                        "SELECT id FROM intents WHERE tag = ?", (intent["tag"],)
+                    )
+                    intent_id = cursor.fetchone()[0]
+
+                    # Insert patterns
+                    for pattern in intent["patterns"]:
+                        cursor.execute(
+                            "INSERT INTO patterns (intent_id, pattern) VALUES (?, ?)",
+                            (intent_id, pattern),
+                        )
+
+                    # Insert responses
+                    for response in intent["responses"]:
+                        cursor.execute(
+                            "INSERT INTO responses (intent_id, response) VALUES (?, ?)",
+                            (intent_id, response),
+                        )
+
+                conn.commit()
+            print(f"Successfully imported intents from {json_file_path}")
+            return True
+
+        except Exception as e:
+            print(f"Error importing intents: {e}")
+            return False
+
+    def export_intents_to_json(self, json_file_path):
+        """Export intents from SQLite database to a JSON file."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                intents_data = {"intents": []}
+
+                # Get all intents
+                cursor.execute("SELECT id, tag FROM intents")
+                intents = cursor.fetchall()
+
+                for intent_id, tag in intents:
+                    # Get patterns for this intent
+                    cursor.execute(
+                        "SELECT pattern FROM patterns WHERE intent_id = ?", (intent_id,)
+                    )
+                    patterns = [row[0] for row in cursor.fetchall()]
+
+                    # Get responses for this intent
+                    cursor.execute(
+                        "SELECT response FROM responses WHERE intent_id = ?",
+                        (intent_id,),
+                    )
+                    responses = [row[0] for row in cursor.fetchall()]
+
+                    intent_obj = {
+                        "tag": tag,
+                        "patterns": patterns,
+                        "responses": responses,
+                    }
+                    intents_data["intents"].append(intent_obj)
+
+                with open(json_file_path, "w", encoding="utf-8") as file:
+                    json.dump(intents_data, file, indent=4)
+
+            print(f"Successfully exported intents to {json_file_path}")
+            return True
+
+        except Exception as e:
+            print(f"Error exporting intents: {e}")
+            return False
+
+    def add_intent(self, tag, patterns, responses):
+        """Add a new intent to the database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                # Insert intent
+                cursor.execute("INSERT INTO intents (tag) VALUES (?)", (tag,))
+                intent_id = cursor.lastrowid
+
+                # Insert patterns
+                for pattern in patterns:
+                    cursor.execute(
+                        "INSERT INTO patterns (intent_id, pattern) VALUES (?, ?)",
+                        (intent_id, pattern),
+                    )
+
+                # Insert responses
+                for response in responses:
+                    cursor.execute(
+                        "INSERT INTO responses (intent_id, response) VALUES (?, ?)",
+                        (intent_id, response),
+                    )
+
+                conn.commit()
+
+            # Retrain the model
+            self._prepare_training_data()
+            self._train_model()
+            return True
+
+        except Exception as e:
+            print(f"Error adding intent: {e}")
+            return False
+
+    def _prepare_training_data(self):
+        """Prepare training data from database."""
+        self.X = []
+        self.y = []
+
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+
+                cursor.execute(
+                    """
+                    SELECT p.pattern, i.tag 
+                    FROM patterns p 
+                    JOIN intents i ON p.intent_id = i.id
+                """
+                )
+
+                for pattern, tag in cursor.fetchall():
+                    processed_pattern = self._preprocess_text(pattern)
+                    self.X.append(processed_pattern)
+                    self.y.append(tag)
+
+        except Exception as e:
+            print(f"Error preparing training data: {e}")
+            raise
+
+    def _get_response(self, tag):
+        """Get a random response for the predicted tag from database."""
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT response 
+                    FROM responses r
+                    JOIN intents i ON r.intent_id = i.id
+                    WHERE i.tag = ?
+                """,
+                    (tag,),
+                )
+
+                responses = cursor.fetchall()
+                if responses:
+                    return random.choice(responses)[0]
+                return "Sorry, I don't have a response for that."
+
+        except Exception as e:
+            print(f"Error getting response: {e}")
+            return "Sorry, I encountered an error while retrieving the response."
+
+    def _setup_auto_training(self):
+        """Setup automatic training schedule."""
+
+        def train_job():
+            print(f"Auto-training started at {datetime.now()}")
+            self._prepare_training_data()
+            self._train_model()
+
+            # Log training history
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT INTO training_history (accuracy) VALUES (?)",
+                    (self.accuracy,),
+                )
+                conn.commit()
+
+        # Schedule training job
+        schedule.every(self.auto_train_interval_hours).hours.do(train_job)
+
+        # Start the scheduling thread
+        def run_schedule():
+            while True:
+                schedule.run_pending()
+                time.sleep(60)
+
+        self.schedule_thread = threading.Thread(target=run_schedule, daemon=True)
+        self.schedule_thread.start()
+
+    # Keeping the existing methods unchanged
+    def _basic_tokenize(self, text):
+        return text.lower().translate(str.maketrans("", "", string.punctuation)).split()
+
+    def _preprocess_text(self, text):
+        tokens = self._basic_tokenize(text)
+        return " ".join(tokens)
+
+    def _train_model(self):
+        if len(self.X) == 0 or len(self.y) == 0:
+            raise ValueError("No training data available. Please check your database.")
+
+        self.pipeline = Pipeline(
+            [
+                ("tfidf", TfidfVectorizer(ngram_range=(1, 2))),
+                (
+                    "classifier",
+                    RandomForestClassifier(n_estimators=100, random_state=42),
+                ),
+            ]
+        )
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, self.y, test_size=0.2, random_state=42
+        )
+        self.pipeline.fit(X_train, y_train)
+        self.accuracy = self.pipeline.score(X_test, y_test)
+        print(f"Model trained with accuracy: {self.accuracy:.2f}")
+
+    def predict_intent(self, user_input):
+        processed_input = self._preprocess_text(user_input)
+        predicted_tag = self.pipeline.predict([processed_input])[0]
+        confidence = np.max(self.pipeline.predict_proba([processed_input]))
+        return (
+            predicted_tag if confidence >= self.confidence_threshold else None
+        ), confidence
+
+    def get_chat_response(self, user_input):
+        self.conversation_history.append({"user": user_input})
+        predicted_tag, confidence = self.predict_intent(user_input)
+
+        if predicted_tag is None:
+            response = (
+                "I'm not entirely sure I understand. Could you please rephrase that?"
+            )
+        else:
+            response = self._get_response(predicted_tag)
+
+        self.conversation_history.append({"bot": response})
+        return response, confidence
+
+
+def main():
+    """Main function to run the chatbot."""
+    print("Initializing chatbot...")
+    try:
+        chatbot = EnhancedChatbot()
+
+        # If this is the first run, import default intents
+        if os.path.exists("intents.json"):
+            print("Importing existing intents from intents.json...")
+            chatbot.import_intents_from_json("intents.json")
+        else:
+            # Create and import default intents
+            default_intents = {
+                "intents": [
+                    {
+                        "tag": "greeting",
+                        "patterns": ["hello", "hi", "hey"],
+                        "responses": ["Hello!", "Hi there!", "Hey! How can I help?"],
+                    },
+                    {
+                        "tag": "goodbye",
+                        "patterns": ["bye", "goodbye", "see you"],
+                        "responses": [
+                            "Goodbye!",
+                            "See you later!",
+                            "Have a great day!",
+                        ],
+                    },
+                ]
+            }
+
+            with open("intents.json", "w", encoding="utf-8") as f:
+                json.dump(default_intents, f, indent=4)
+            print("Created and importing default intents...")
+            chatbot.import_intents_from_json("intents.json")
+
+        print("Chatbot is ready! Type 'exit' to end the chat.")
+
+        while True:
+            try:
+                user_input = input("You: ").strip()
+
+                if user_input.lower() in ["exit", "quit", "bye"]:
+                    print("Chatbot: Goodbye! Have a great day!")
+                    break
+
+                if not user_input:
+                    print("Chatbot: Please say something!")
+                    continue
+
+                response, confidence = chatbot.get_chat_response(user_input)
+                print(f"Chatbot: {response}")
+                print(f"Confidence: {confidence:.2f}")
+
+            except KeyboardInterrupt:
+                print("\nChatbot: Goodbye! Have a great day!")
+                break
+            except Exception as e:
+                print(f"An error occurred: {e}")
+                print(
+                    "Chatbot: I encountered an error. Let's continue our conversation."
+                )
+
+    except Exception as e:
+        print(f"Failed to initialize chatbot: {e}")
+        print("Please ensure your database is properly configured and accessible.")
+
+
+if __name__ == "__main__":
+    main()

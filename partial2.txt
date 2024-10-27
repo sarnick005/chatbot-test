@@ -1,0 +1,318 @@
+import json
+import random
+import numpy as np
+import os
+import string
+import tensorflow as tf
+from tensorflow.keras.preprocessing.text import Tokenizer
+from tensorflow.keras.preprocessing.sequence import pad_sequences
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Dense, Embedding, GlobalAveragePooling1D, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+
+
+class EnhancedNeuralChatbot:
+    def __init__(self, intents_file_path="intents.json", confidence_threshold=0.4):
+        """Initialize the chatbot with the given intents file and confidence threshold."""
+        self.confidence_threshold = confidence_threshold
+        self.max_sequence_length = 20
+        self.embedding_dim = 16
+        self.num_epochs = 100
+        self.batch_size = 32
+        self.vocab_size = 1000
+
+        # Initialize processing tools
+        self.tokenizer = Tokenizer(num_words=self.vocab_size, oov_token="<OOV>")
+        self.label_encoder = LabelEncoder()
+
+        # Load intents and prepare data
+        self.intents = self._load_intents(intents_file_path)
+        self._prepare_training_data()
+        self._build_and_train_model()
+
+    def _load_intents(self, file_path):
+        """Load intents from various possible file paths."""
+        possible_paths = [
+            file_path,
+            os.path.join(os.getcwd(), file_path),
+            os.path.join(os.getcwd(), "data", file_path),
+            os.path.join(os.path.dirname(__file__), file_path),
+            os.path.join(os.path.dirname(__file__), "data", file_path),
+        ]
+
+        for path in possible_paths:
+            if os.path.isfile(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as file:
+                        loaded_intents = json.load(file)
+                    print(f"Successfully loaded intents from: {path}")
+                    return loaded_intents
+                except json.JSONDecodeError as e:
+                    print(f"JSON decode error in {path}: {e}")
+                except Exception as e:
+                    print(f"Error loading {path}: {e}")
+
+        raise FileNotFoundError(
+            "Intents file not found. Please ensure the file exists in one of the searched paths."
+        )
+
+    def _preprocess_text(self, text):
+        """Preprocess the input text."""
+        # Remove punctuation and convert to lowercase
+        text = text.lower()
+        text = text.translate(str.maketrans("", "", string.punctuation))
+        return text
+
+    def _prepare_training_data(self):
+        """Prepare training data from intents."""
+        # Collect training data
+        training_sentences = []
+        training_labels = []
+        labels = []
+        responses = {}
+
+        for intent in self.intents["intents"]:
+            for pattern in intent["patterns"]:
+                training_sentences.append(self._preprocess_text(pattern))
+                training_labels.append(intent["tag"])
+            responses[intent["tag"]] = intent["responses"]
+            labels.append(intent["tag"])
+
+        # Encode the labels
+        self.label_encoder.fit(labels)
+        self.encoded_labels = self.label_encoder.transform(training_labels)
+
+        # Prepare text sequences
+        self.tokenizer.fit_on_texts(training_sentences)
+        self.sequences = self.tokenizer.texts_to_sequences(training_sentences)
+        self.padded_sequences = pad_sequences(
+            self.sequences, maxlen=self.max_sequence_length, padding="post"
+        )
+
+        # Store responses for later use
+        self.responses = responses
+
+    def _build_and_train_model(self):
+        """Build and train the neural network model."""
+        num_classes = len(self.label_encoder.classes_)
+
+        # Build the model
+        self.model = Sequential(
+            [
+                Embedding(
+                    self.vocab_size,
+                    self.embedding_dim,
+                    input_length=self.max_sequence_length,
+                ),
+                GlobalAveragePooling1D(),
+                Dense(64, activation="relu"),
+                Dropout(0.5),
+                Dense(32, activation="relu"),
+                Dropout(0.3),
+                Dense(num_classes, activation="softmax"),
+            ]
+        )
+
+        # Compile the model
+        self.model.compile(
+            optimizer="adam",
+            loss="sparse_categorical_crossentropy",
+            metrics=["accuracy"],
+        )
+
+        # Split the data
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.padded_sequences, self.encoded_labels, test_size=0.2, random_state=42
+        )
+
+        # Early stopping callback
+        early_stopping = EarlyStopping(
+            monitor="val_loss", patience=10, restore_best_weights=True
+        )
+
+        # Train the model
+        history = self.model.fit(
+            X_train,
+            y_train,
+            epochs=self.num_epochs,
+            batch_size=self.batch_size,
+            validation_data=(X_test, y_test),
+            callbacks=[early_stopping],
+            verbose=1,
+        )
+
+        # Evaluate the model
+        self.accuracy = self.model.evaluate(X_test, y_test)[1]
+        print(f"Model trained with accuracy: {self.accuracy:.2f}")
+
+    def predict_intent(self, user_input):
+        """Predict the intent of user input."""
+        # Preprocess input
+        preprocessed_input = self._preprocess_text(user_input)
+
+        # Convert to sequence and pad
+        sequence = self.tokenizer.texts_to_sequences([preprocessed_input])
+        padded_sequence = pad_sequences(
+            sequence, maxlen=self.max_sequence_length, padding="post"
+        )
+
+        # Get prediction
+        prediction = self.model.predict(padded_sequence, verbose=0)[0]
+        predicted_class_idx = np.argmax(prediction)
+        confidence = prediction[predicted_class_idx]
+
+        if confidence >= self.confidence_threshold:
+            predicted_tag = self.label_encoder.inverse_transform([predicted_class_idx])[
+                0
+            ]
+            return predicted_tag, confidence
+        return None, confidence
+
+    def get_chat_response(self, user_input):
+        """Generate a response to user input."""
+        predicted_tag, confidence = self.predict_intent(user_input)
+
+        if predicted_tag is None:
+            response = (
+                "I'm not entirely sure I understand. Could you please rephrase that?"
+            )
+        else:
+            response = random.choice(self.responses[predicted_tag])
+
+        return response, confidence
+
+    def save_model(self, model_path="chatbot_model"):
+        """Save the trained model and preprocessing objects."""
+        try:
+            # Save the neural network model
+            self.model.save(f"{model_path}_neural")
+
+            # Save the tokenizer
+            tokenizer_json = self.tokenizer.to_json()
+            with open(f"{model_path}_tokenizer.json", "w", encoding="utf-8") as f:
+                f.write(tokenizer_json)
+
+            # Save the label encoder classes
+            np.save(f"{model_path}_label_encoder.npy", self.label_encoder.classes_)
+
+            print(f"Model and preprocessing objects saved to {model_path}")
+            return True
+        except Exception as e:
+            print(f"Error saving model: {e}")
+            return False
+
+    def load_model(self, model_path="chatbot_model"):
+        """Load a previously saved model and preprocessing objects."""
+        try:
+            # Load the neural network model
+            self.model = tf.keras.models.load_model(f"{model_path}_neural")
+
+            # Load the tokenizer
+            with open(f"{model_path}_tokenizer.json", "r", encoding="utf-8") as f:
+                tokenizer_json = f.read()
+                self.tokenizer = tf.keras.preprocessing.text.tokenizer_from_json(
+                    tokenizer_json
+                )
+
+            # Load the label encoder classes
+            self.label_encoder.classes_ = np.load(f"{model_path}_label_encoder.npy")
+
+            print(f"Model and preprocessing objects loaded from {model_path}")
+            return True
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return False
+
+
+def main():
+    """Main function to run the chatbot."""
+    print("Initializing neural network chatbot...")
+    try:
+        # Create a default intents file if it doesn't exist
+        default_intents = {
+            "intents": [
+                {
+                    "tag": "greeting",
+                    "patterns": [
+                        "hello",
+                        "hi",
+                        "hey",
+                        "good morning",
+                        "good afternoon",
+                        "good evening",
+                        "hi there",
+                        "hello there",
+                        "greetings",
+                    ],
+                    "responses": [
+                        "Hello! How can I help you today?",
+                        "Hi there! What can I do for you?",
+                        "Hey! How may I assist you?",
+                        "Greetings! How can I be of service?",
+                    ],
+                },
+                {
+                    "tag": "goodbye",
+                    "patterns": [
+                        "bye",
+                        "goodbye",
+                        "see you later",
+                        "see you soon",
+                        "have a good day",
+                        "bye bye",
+                        "take care",
+                    ],
+                    "responses": [
+                        "Goodbye! Have a great day!",
+                        "See you later! Take care!",
+                        "Bye! Come back soon!",
+                        "Take care! Looking forward to our next chat!",
+                    ],
+                },
+            ]
+        }
+
+        if not os.path.exists("intents.json"):
+            with open("intents.json", "w", encoding="utf-8") as f:
+                json.dump(default_intents, f, indent=4)
+            print("Created default intents.json file")
+
+        chatbot = EnhancedNeuralChatbot()
+        print("Neural network chatbot is ready! Type 'exit' to end the chat.")
+
+        while True:
+            try:
+                user_input = input("You: ").strip()
+
+                if user_input.lower() in ["exit", "quit", "bye"]:
+                    print("Chatbot: Goodbye! Have a great day!")
+                    break
+
+                if not user_input:
+                    print("Chatbot: Please say something!")
+                    continue
+
+                response, confidence = chatbot.get_chat_response(user_input)
+                print(f"Chatbot: {response}")
+                print(f"Confidence: {confidence:.2f}")
+
+            except KeyboardInterrupt:
+                print("\nChatbot: Goodbye! Have a great day!")
+                break
+            except Exception as e:
+                print(f"An error occurred: {e}")
+                print(
+                    "Chatbot: I encountered an error. Let's continue our conversation."
+                )
+
+    except Exception as e:
+        print(f"Failed to initialize chatbot: {e}")
+        print(
+            "Please ensure your intents.json file is properly formatted and accessible."
+        )
+
+
+if __name__ == "__main__":
+    main()

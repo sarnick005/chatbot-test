@@ -1,0 +1,102 @@
+# import json
+# import random
+# from sklearn.feature_extraction.text import CountVectorizer
+# from sklearn.linear_model import LogisticRegression
+# from sklearn.pipeline import Pipeline
+# import joblib
+
+# # Define intents data directly in the script
+# intents = {
+#   "intents": [
+#     {
+#       "tag": "greeting",
+#       "patterns": ["Hi", "Hello", "Hey", "How are you", "Good day"],
+#       "responses": [
+#         "Hello! How can I help you with college information?",
+#         "Hi there! What would you like to know about our college?"
+#       ]
+#     },
+#     {
+#       "tag": "admission",
+#       "patterns": [
+#         "How can I apply",
+#         "admission process",
+#         "application deadline",
+#         "admission requirements"
+#       ],
+#       "responses": [
+#         "Our admission process involves: 1. Online application 2. Submit transcripts 3. Letters of recommendation. The deadline is March 31st."
+#       ]
+#     },
+#     {
+#       "tag": "courses",
+#       "patterns": [
+#         "What courses do you offer",
+#         "available programs",
+#         "majors",
+#         "departments"
+#       ],
+#       "responses": [
+#         "We offer various programs including: Computer Science, Engineering, Business, Arts and Sciences. Visit our website for a complete list."
+#       ]
+#     },
+#     {
+#       "tag": "fees",
+#       "patterns": [
+#         "How much is the tuition",
+#         "fee structure",
+#         "cost",
+#         "financial aid"
+#       ],
+#       "responses": [
+#         "Tuition varies by program. We offer financial aid and scholarships. Contact our financial office for detailed information."
+#       ]
+#     },
+#     {
+#       "tag": "goodbye",
+#       "patterns": ["Bye", "See you", "Goodbye", "Thanks", "Thank you"],
+#       "responses": [
+#         "Goodbye! Feel free to ask if you have more questions.",
+#         "Thank you for your interest in our college!"
+#       ]
+#     }
+#   ]
+# }
+
+# # Prepare data for training
+# X = []
+# y = []
+
+# for intent in intents["intents"]:
+#     for pattern in intent["patterns"]:
+#         X.append(pattern)
+#         y.append(intent["tag"])
+
+# # Create a pipeline with CountVectorizer using split as tokenizer
+# pipeline = Pipeline([
+#     ('vectorizer', CountVectorizer(tokenizer=lambda text: text.split())),  # Tokenizer set to split by space
+#     ('classifier', LogisticRegression())
+# ])
+
+# # Train the model
+# pipeline.fit(X, y)
+
+# # Function to get a response based on predicted intent
+# def get_response(tag):
+#     for intent in intents["intents"]:
+#         if intent["tag"] == tag:
+#             return random.choice(intent["responses"])
+#     return "I'm not sure about that. Can you ask something else?"
+
+# # Chatbot main loop
+# print("Chatbot is running! Type 'exit' to end the chat.")
+# while True:
+#     user_input = input("You: ")
+#     if user_input.lower() == "exit":
+#         print("Chatbot: Goodbye!")
+#         break
+
+#     # Predict intent and generate response
+#     intent = pipeline.predict([user_input])[0]
+#     response = get_response(intent)
+#     print(f"Chatbot: {response}")

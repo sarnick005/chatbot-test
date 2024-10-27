@@ -1,0 +1,286 @@
+import numpy as np
+import mysql.connector
+from mysql.connector import Error
+from datetime import datetime
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import train_test_split
+
+
+class SelfLearningChatbot:
+    def __init__(self, db_config, confidence_threshold=0.4):
+        """Initialize the self-learning chatbot with MySQL database."""
+        self.db_config = db_config
+        self.confidence_threshold = confidence_threshold
+        self.conversation_history = []
+        self._init_database()
+        self._prepare_training_data()
+        self._train_model()
+
+    def _create_connection(self):
+        """Create a MySQL database connection."""
+        try:
+            connection = mysql.connector.connect(**self.db_config)
+            if connection.is_connected():
+                return connection
+        except Error as e:
+            print(f"Error while connecting to MySQL: {e}")
+            return None
+
+    def _init_database(self):
+        """Initialize the database with learning-related tables."""
+        connection = self._create_connection()
+        if connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_feedback (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_input TEXT NOT NULL,
+                    bot_response TEXT NOT NULL,
+                    intent_tag VARCHAR(255),
+                    feedback_score INT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS learned_patterns (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    intent_id INT,
+                    pattern TEXT NOT NULL,
+                    confidence FLOAT DEFAULT 1.0,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (intent_id) REFERENCES intents(id)
+                )
+                """
+            )
+
+            connection.commit()
+            cursor.close()
+            connection.close()
+
+    def _prepare_training_data(self):
+        """Prepare training data from both original and learned patterns."""
+        self.X = []
+        self.y = []
+
+        connection = self._create_connection()
+        if connection:
+            cursor = connection.cursor()
+
+            # Get patterns from original patterns table
+            cursor.execute(
+                """
+                SELECT p.pattern, i.tag 
+                FROM patterns p 
+                JOIN intents i ON p.intent_id = i.id
+                """
+            )
+            for pattern, tag in cursor.fetchall():
+                self.X.append(pattern.lower())
+                self.y.append(tag)
+
+            # Get patterns from learned patterns table
+            cursor.execute(
+                """
+                SELECT lp.pattern, i.tag 
+                FROM learned_patterns lp 
+                JOIN intents i ON lp.intent_id = i.id
+                """
+            )
+            for pattern, tag in cursor.fetchall():
+                self.X.append(pattern.lower())
+                self.y.append(tag)
+
+            cursor.close()
+            connection.close()
+
+    def _train_model(self):
+        """Train the model with available data."""
+        if not self.X or not self.y:
+            raise ValueError("No training data available")
+
+        self.pipeline = Pipeline(
+            [
+                ("tfidf", TfidfVectorizer(ngram_range=(1, 2))),
+                (
+                    "classifier",
+                    RandomForestClassifier(n_estimators=100, random_state=42),
+                ),
+            ]
+        )
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, self.y, test_size=0.2, random_state=42
+        )
+
+        self.pipeline.fit(X_train, y_train)
+        self.accuracy = self.pipeline.score(X_test, y_test)
+        print(f"Model trained with accuracy: {self.accuracy:.2f}")
+
+    def learn_from_interaction(
+        self, user_input, response, feedback_score, intent_tag=None
+    ):
+        """Learn from user interactions."""
+        connection = self._create_connection()
+        if connection:
+            cursor = connection.cursor()
+
+            # Store feedback
+            cursor.execute(
+                """
+                INSERT INTO user_feedback (user_input, bot_response, intent_tag, feedback_score) 
+                VALUES (%s, %s, %s, %s)
+                """,
+                (user_input, response, intent_tag, feedback_score),
+            )
+
+            # If feedback is positive, consider adding to learned patterns
+            if feedback_score > 3:  # Matches 1-5 scale
+                predicted_tag, _ = self.predict_intent(user_input)
+                if predicted_tag:
+                    cursor.execute(
+                        "SELECT id FROM intents WHERE tag = %s", (predicted_tag,)
+                    )
+                    intent_id = cursor.fetchone()[0]
+
+                    # Add to learned patterns if not exists
+                    cursor.execute(
+                        """
+                        INSERT INTO learned_patterns (intent_id, pattern, confidence)
+                        SELECT %s, %s, %s
+                        WHERE NOT EXISTS (
+                            SELECT 1 FROM learned_patterns 
+                            WHERE pattern = %s AND intent_id = %s
+                        )
+                        """,
+                        (
+                            intent_id,
+                            user_input,
+                            feedback_score / 5,
+                            user_input,
+                            intent_id,
+                        ),
+                    )
+
+            connection.commit()
+            cursor.close()
+            connection.close()
+
+            # Check if retraining is needed
+            self._check_and_retrain()
+
+    def _check_and_retrain(self):
+        """Check if retraining is needed based on new learned patterns."""
+        connection = self._create_connection()
+        if connection:
+            cursor = connection.cursor()
+            cursor.execute("SELECT COUNT(*) FROM learned_patterns")
+            learned_count = cursor.fetchone()[0]
+
+            # Retrain if we have enough new patterns (arbitrary threshold)
+            if learned_count % 5 == 0 and learned_count > 0:
+                self._prepare_training_data()
+                self._train_model()
+
+            cursor.close()
+            connection.close()
+
+    def predict_intent(self, user_input):
+        """Predict intent with confidence score."""
+        processed_input = user_input.lower()
+        predicted_tag = self.pipeline.predict([processed_input])[0]
+        confidence = np.max(self.pipeline.predict_proba([processed_input]))
+        return (
+            predicted_tag if confidence >= self.confidence_threshold else None,
+            confidence,
+        )
+
+    def get_response(self, tag):
+        """Get response for the predicted tag."""
+        connection = self._create_connection()
+        if connection:
+            cursor = connection.cursor()
+            cursor.execute(
+                """
+                SELECT response 
+                FROM responses r
+                JOIN intents i ON r.intent_id = i.id
+                WHERE i.tag = %s
+                """,
+                (tag,),
+            )
+
+            responses = cursor.fetchall()
+            cursor.close()
+            connection.close()
+
+            if responses:
+                return np.random.choice([r[0] for r in responses])
+            return "I'm still learning about that."
+
+    def chat(self, user_input):
+        """Main chat function with learning capabilities."""
+        predicted_tag, confidence = self.predict_intent(user_input)
+
+        if predicted_tag is None:
+            response = (
+                "I'm not quite sure about that yet. Could you rephrase or teach me?"
+            )
+            feedback_score = 0
+        else:
+            response = self.get_response(predicted_tag)
+            feedback_score = int(confidence * 5)  # Convert confidence to 1-5 scale
+
+        # Learn from this interaction
+        self.learn_from_interaction(user_input, response, feedback_score, predicted_tag)
+
+        return response, confidence
+
+
+def main():
+    """Main function to run the chatbot."""
+    db_config = {
+        "user": "your_user",
+        "password": "your_password",
+        "host": "localhost",
+        "database": "your_database",
+    }
+
+    print("Initializing self-learning chatbot...")
+    try:
+        chatbot = SelfLearningChatbot(db_config)
+        print("Chatbot is ready! Type 'exit' to end the chat.")
+
+        while True:
+            user_input = input("You: ").strip()
+
+            if user_input.lower() in ["exit", "quit", "bye"]:
+                print("Chatbot: Goodbye! Thanks for helping me learn!")
+                break
+
+            response, confidence = chatbot.chat(user_input)
+            print(f"Chatbot: {response}")
+            print(f"Confidence: {confidence:.2f}")
+
+            # Optional: Collect explicit feedback
+            feedback = input(
+                "Was this response helpful? (1-5, or press Enter to skip): "
+            ).strip()
+            if feedback.isdigit() and 1 <= int(feedback) <= 5:
+                chatbot.learn_from_interaction(
+                    user_input, response, int(feedback), None
+                )
+
+    except KeyboardInterrupt:
+        print("\nChatbot: Goodbye! Thanks for the conversation!")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+
+if __name__ == "__main__":
+    main()
